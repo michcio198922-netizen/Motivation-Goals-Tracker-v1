@@ -25,7 +25,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 
 const STORAGE_KEY = 'motivationGoals.state.v1';
-const BACKUP_VERSION = 5;
+const BACKUP_VERSION = 6;
 const WIDGET_FILE = 'widget_state.json';
 
 Notifications.setNotificationHandler({
@@ -150,6 +150,7 @@ const INITIAL_STATE = {
   sessionPrep: {},
   dailyReviews: {},
   smallWins: {},
+  decisions: [],
   notifications: { enabled: false, hour: 8 },
 };
 
@@ -465,6 +466,27 @@ function normalizeState(parsed) {
     sessionPrep: parsed?.sessionPrep && typeof parsed.sessionPrep === 'object' ? parsed.sessionPrep : {},
     dailyReviews: parsed?.dailyReviews && typeof parsed.dailyReviews === 'object' ? parsed.dailyReviews : {},
     smallWins: parsed?.smallWins && typeof parsed.smallWins === 'object' ? parsed.smallWins : {},
+    decisions: Array.isArray(parsed?.decisions)
+      ? parsed.decisions
+        .filter((decision) => decision && typeof decision === 'object')
+        .map((decision, index) => ({
+          id: String(decision.id || `decision_legacy_${index}`),
+          title: String(decision.title || 'Decyzja'),
+          why: String(decision.why || ''),
+          expectation: String(decision.expectation || ''),
+          risk: String(decision.risk || ''),
+          goalAligned: decision.goalAligned !== false,
+          identityAligned: decision.identityAligned !== false,
+          createdAt: String(decision.createdAt || localDateKey()),
+          reviewDate: String(decision.reviewDate || decision.createdAt || localDateKey()),
+          status: decision.status === 'reviewed' ? 'reviewed' : 'pending',
+          finalVerdict: ['good', 'bad'].includes(decision.finalVerdict) ? decision.finalVerdict : '',
+          outcome: String(decision.outcome || ''),
+          lesson: String(decision.lesson || ''),
+          reviewedAt: decision.reviewedAt ? String(decision.reviewedAt) : null,
+          reviewHistory: Array.isArray(decision.reviewHistory) ? decision.reviewHistory : [],
+        }))
+      : [],
     notifications: {
       ...INITIAL_STATE.notifications,
       ...(parsed?.notifications || {}),
@@ -563,6 +585,9 @@ export default function App() {
   const monthStats = useMemo(() => monthlyStats(data.disciplineLog), [data.disciplineLog]);
   const perRuleStats = useMemo(() => ruleStats(data.disciplineLog, data.rules), [data.disciplineLog, data.rules]);
   const activeRules = data.rules.filter((rule) => !rule.archived);
+  const dueDecisions = data.decisions.filter(
+    (decision) => decision.status !== 'reviewed' && decision.reviewDate <= todayKey,
+  ).length;
 
   useEffect(() => {
     if (!loaded) return;
@@ -816,6 +841,110 @@ export default function App() {
     setData((current) => ({ ...current, notifications: { ...current.notifications, enabled: true } }));
   };
 
+  const addDecision = ({
+    title,
+    why,
+    expectation,
+    risk,
+    goalAligned,
+    identityAligned,
+    reviewDays,
+  }) => {
+    const cleanTitle = String(title || '').trim();
+    if (!cleanTitle) {
+      Alert.alert('Decyzja', 'Wpisz, jaką decyzję podejmujesz.');
+      return false;
+    }
+
+    const days = Math.max(1, Number(reviewDays) || 30);
+    const createdAt = localDateKey();
+    const reviewDate = localDateKey(addDays(new Date(), days));
+
+    setData((current) => ({
+      ...current,
+      decisions: [
+        {
+          id: `decision_${Date.now().toString(36)}`,
+          title: cleanTitle,
+          why: String(why || '').trim(),
+          expectation: String(expectation || '').trim(),
+          risk: String(risk || '').trim(),
+          goalAligned: Boolean(goalAligned),
+          identityAligned: Boolean(identityAligned),
+          createdAt,
+          reviewDate,
+          status: 'pending',
+          finalVerdict: '',
+          outcome: '',
+          lesson: '',
+          reviewedAt: null,
+          reviewHistory: [],
+        },
+        ...current.decisions,
+      ],
+    }));
+    return true;
+  };
+
+  const reviewDecision = (id, { verdict, outcome, lesson }) => {
+    const cleanVerdict = ['good', 'bad', 'early'].includes(verdict) ? verdict : '';
+    if (!cleanVerdict) {
+      Alert.alert('Ocena decyzji', 'Wybierz: dobra, zła albo za wcześnie.');
+      return false;
+    }
+
+    const reviewDate = localDateKey();
+    setData((current) => ({
+      ...current,
+      decisions: current.decisions.map((decision) => {
+        if (decision.id !== id) return decision;
+        const historyEntry = {
+          date: reviewDate,
+          verdict: cleanVerdict,
+          outcome: String(outcome || '').trim(),
+          lesson: String(lesson || '').trim(),
+        };
+
+        if (cleanVerdict === 'early') {
+          return {
+            ...decision,
+            reviewDate: localDateKey(addDays(new Date(), 30)),
+            reviewHistory: [...(decision.reviewHistory || []), historyEntry],
+          };
+        }
+
+        return {
+          ...decision,
+          status: 'reviewed',
+          finalVerdict: cleanVerdict,
+          outcome: String(outcome || '').trim(),
+          lesson: String(lesson || '').trim(),
+          reviewedAt: reviewDate,
+          reviewHistory: [...(decision.reviewHistory || []), historyEntry],
+        };
+      }),
+    }));
+    return true;
+  };
+
+  const deleteDecision = (id) => {
+    Alert.alert(
+      'Usunąć decyzję?',
+      'Decyzja i jej późniejsza ocena zostaną usunięte.',
+      [
+        { text: 'Anuluj', style: 'cancel' },
+        {
+          text: 'Usuń',
+          style: 'destructive',
+          onPress: () => setData((current) => ({
+            ...current,
+            decisions: current.decisions.filter((decision) => decision.id !== id),
+          })),
+        },
+      ],
+    );
+  };
+
   const openTradingJournal = async () => {
     try {
       if (Platform.OS !== 'android') {
@@ -932,8 +1061,10 @@ export default function App() {
                 todayFocus={data.focusLog[todayKey] || ''}
                 thisWeek={thisWeek}
                 lastWeek={lastWeek}
+                decisionDueCount={dueDecisions}
                 onOpenJournal={openTradingJournal}
                 goDailyJournal={() => setTab('journal')}
+                goDecisions={() => setTab('decisions')}
                 goDiscipline={() => setTab('streak')}
                 openReset={() => setResetVisible(true)}
               />
@@ -966,6 +1097,15 @@ export default function App() {
                 onUpdateFocus={updateFocus}
                 onUpdateJournalField={updateJournalField}
                 onUpdateSmallWin={updateSmallWin}
+              />
+            )}
+
+            {tab === 'decisions' && (
+              <DecisionsScreen
+                decisions={data.decisions}
+                onAddDecision={addDecision}
+                onReviewDecision={reviewDecision}
+                onDeleteDecision={deleteDecision}
               />
             )}
 
@@ -1035,8 +1175,10 @@ function HomeScreen({
   todayFocus,
   thisWeek,
   lastWeek,
+  decisionDueCount,
   onOpenJournal,
   goDailyJournal,
+  goDecisions,
   goDiscipline,
   openReset,
 }) {
@@ -1062,6 +1204,21 @@ function HomeScreen({
         <Text style={styles.focusPreview}>{todayFocus || 'Ustaw jedno zdanie, którego chcesz trzymać się podczas sesji.'}</Text>
         <Text style={styles.quoteMeta}>Dotknij, żeby otworzyć dziennik dnia.</Text>
       </Pressable>
+
+      {decisionDueCount > 0 && (
+        <Pressable onPress={goDecisions} style={[styles.card, styles.decisionDueHome]}>
+          <View style={styles.decisionDueHomeRow}>
+            <View style={styles.flex}>
+              <Text style={styles.cardKicker}>DECYZJE DO SPRAWDZENIA</Text>
+              <Text style={styles.decisionDueHomeTitle}>
+                {decisionDueCount === 1 ? '1 decyzja czeka na ocenę' : `${decisionDueCount} decyzje czekają na ocenę`}
+              </Text>
+              <Text style={styles.muted}>Sprawdź wynik bez zmieniania historii pod to, co już wiesz.</Text>
+            </View>
+            <Text style={styles.decisionDueHomeArrow}>›</Text>
+          </View>
+        </Pressable>
+      )}
 
       <View style={styles.twoColumns}>
         <Pressable onPress={goDiscipline} style={[styles.card, styles.halfCard]}>
@@ -1508,6 +1665,348 @@ function JournalToggle({ label, value, onPress }) {
   );
 }
 
+
+function DecisionsScreen({
+  decisions,
+  onAddDecision,
+  onReviewDecision,
+  onDeleteDecision,
+}) {
+  const todayKey = localDateKey();
+  const [title, setTitle] = useState('');
+  const [why, setWhy] = useState('');
+  const [expectation, setExpectation] = useState('');
+  const [risk, setRisk] = useState('');
+  const [reviewDays, setReviewDays] = useState(30);
+  const [goalAligned, setGoalAligned] = useState(true);
+  const [identityAligned, setIdentityAligned] = useState(true);
+
+  const [reviewingId, setReviewingId] = useState(null);
+  const [reviewVerdict, setReviewVerdict] = useState('good');
+  const [reviewOutcome, setReviewOutcome] = useState('');
+  const [reviewLesson, setReviewLesson] = useState('');
+
+  const pending = [...decisions]
+    .filter((decision) => decision.status !== 'reviewed')
+    .sort((a, b) => String(a.reviewDate).localeCompare(String(b.reviewDate)));
+  const reviewed = [...decisions]
+    .filter((decision) => decision.status === 'reviewed')
+    .sort((a, b) => String(b.reviewedAt || '').localeCompare(String(a.reviewedAt || '')));
+  const dueCount = pending.filter((decision) => decision.reviewDate <= todayKey).length;
+
+  const submitDecision = () => {
+    const saved = onAddDecision({
+      title,
+      why,
+      expectation,
+      risk,
+      goalAligned,
+      identityAligned,
+      reviewDays,
+    });
+    if (!saved) return;
+
+    setTitle('');
+    setWhy('');
+    setExpectation('');
+    setRisk('');
+    setReviewDays(30);
+    setGoalAligned(true);
+    setIdentityAligned(true);
+  };
+
+  const startReview = (id) => {
+    setReviewingId(id);
+    setReviewVerdict('good');
+    setReviewOutcome('');
+    setReviewLesson('');
+  };
+
+  const saveReview = () => {
+    if (!reviewingId) return;
+    const saved = onReviewDecision(reviewingId, {
+      verdict: reviewVerdict,
+      outcome: reviewOutcome,
+      lesson: reviewLesson,
+    });
+    if (!saved) return;
+
+    if (reviewVerdict === 'early') {
+      Alert.alert('Za wcześnie', 'Decyzja wróci do oceny za 30 dni.');
+    }
+    setReviewingId(null);
+    setReviewVerdict('good');
+    setReviewOutcome('');
+    setReviewLesson('');
+  };
+
+  return (
+    <View style={styles.stack}>
+      <View style={styles.screenTitleWrap}>
+        <Text style={styles.screenKicker}>KIERUNEK</Text>
+        <Text style={styles.screenTitle}>Dziennik decyzji</Text>
+        <Text style={styles.screenSubtitle}>
+          Zapisuj ważne decyzje zanim poznasz wynik. Później oceniaj jakość myślenia, nie tylko rezultat.
+        </Text>
+      </View>
+
+      <View style={styles.weekStats}>
+        <View style={styles.weekStat}>
+          <Text style={styles.weekStatValue}>{decisions.length}</Text>
+          <Text style={styles.weekStatLabel}>wszystkie decyzje</Text>
+        </View>
+        <View style={styles.weekStat}>
+          <Text style={[styles.weekStatValue, dueCount > 0 && { color: COLORS.yellow }]}>{dueCount}</Text>
+          <Text style={styles.weekStatLabel}>do oceny teraz</Text>
+        </View>
+        <View style={styles.weekStat}>
+          <Text style={styles.weekStatValue}>{reviewed.length}</Text>
+          <Text style={styles.weekStatLabel}>ocenione decyzje</Text>
+        </View>
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.cardKicker}>NOWA WAŻNA DECYZJA</Text>
+        <Text style={[styles.muted, { marginTop: 6 }]}>
+          Nie zapisuj drobiazgów. Chodzi o decyzje, które mogą zmienić Twój kierunek, zasady albo sposób działania.
+        </Text>
+
+        <JournalField
+          label="CO DECYDUJĘ?"
+          value={title}
+          onChange={setTitle}
+          placeholder="np. Przez 30 dni handluję tylko setup A"
+        />
+        <JournalField
+          label="DLACZEGO PODEJMUJĘ TĘ DECYZJĘ?"
+          value={why}
+          onChange={setWhy}
+          placeholder="Jakie fakty i argumenty za tym stoją?"
+          multiline
+        />
+        <JournalField
+          label="CZEGO SIĘ SPODZIEWAM?"
+          value={expectation}
+          onChange={setExpectation}
+          placeholder="Co powinno się wydarzyć, jeśli mam rację?"
+          multiline
+        />
+        <JournalField
+          label="NAJWIĘKSZE RYZYKO"
+          value={risk}
+          onChange={setRisk}
+          placeholder="Co może pójść źle?"
+          multiline
+        />
+
+        <Text style={styles.decisionSectionLabel}>FILTR KIERUNKU</Text>
+        <Pressable
+          onPress={() => setGoalAligned((value) => !value)}
+          style={[styles.decisionToggle, goalAligned && styles.decisionToggleActive]}
+        >
+          <View style={[styles.ruleCheck, goalAligned && styles.ruleCheckDone]}>
+            <Text style={styles.ruleCheckText}>{goalAligned ? '✓' : ''}</Text>
+          </View>
+          <Text style={styles.decisionToggleText}>Ta decyzja przybliża mnie do mojego głównego celu.</Text>
+        </Pressable>
+        <Pressable
+          onPress={() => setIdentityAligned((value) => !value)}
+          style={[styles.decisionToggle, identityAligned && styles.decisionToggleActive]}
+        >
+          <View style={[styles.ruleCheck, identityAligned && styles.ruleCheckDone]}>
+            <Text style={styles.ruleCheckText}>{identityAligned ? '✓' : ''}</Text>
+          </View>
+          <Text style={styles.decisionToggleText}>Ta decyzja jest zgodna z osobą, którą chcę się stać.</Text>
+        </Pressable>
+
+        <Text style={styles.decisionSectionLabel}>KIEDY SPRAWDZIĆ WYNIK?</Text>
+        <View style={styles.decisionReviewChips}>
+          {[7, 30, 90].map((days) => (
+            <Pressable
+              key={days}
+              onPress={() => setReviewDays(days)}
+              style={[styles.decisionReviewChip, reviewDays === days && styles.decisionReviewChipActive]}
+            >
+              <Text style={[styles.decisionReviewChipText, reviewDays === days && styles.decisionReviewChipTextActive]}>
+                {days} DNI
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+
+        <Pressable onPress={submitDecision} style={[styles.primaryButton, { marginTop: 16 }]}>
+          <Text style={styles.primaryButtonText}>ZAPISZ DECYZJĘ</Text>
+        </Pressable>
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.cardKicker}>OTWARTE DECYZJE</Text>
+        {pending.length === 0 ? (
+          <View style={styles.emptyProcessBox}>
+            <Text style={styles.emptyProcessTitle}>Brak decyzji do obserwowania</Text>
+            <Text style={styles.emptyProcessText}>Nową ważną decyzję możesz zapisać powyżej.</Text>
+          </View>
+        ) : (
+          <View style={styles.decisionList}>
+            {pending.map((decision) => {
+              const due = decision.reviewDate <= todayKey;
+              const isReviewing = reviewingId === decision.id;
+              return (
+                <View key={decision.id} style={[styles.decisionItem, due && styles.decisionItemDue]}>
+                  <View style={styles.decisionItemHeader}>
+                    <View style={styles.flex}>
+                      <Text style={styles.decisionItemTitle}>{decision.title}</Text>
+                      <Text style={styles.decisionItemDate}>
+                        zapisano {formatFullPolishDate(fromDateKey(decision.createdAt))}
+                      </Text>
+                    </View>
+                    {due && <Text style={styles.decisionDueBadge}>DO OCENY</Text>}
+                  </View>
+
+                  {!!decision.why && (
+                    <View style={styles.decisionDetailBlock}>
+                      <Text style={styles.decisionDetailLabel}>DLACZEGO</Text>
+                      <Text style={styles.decisionDetailText}>{decision.why}</Text>
+                    </View>
+                  )}
+                  {!!decision.expectation && (
+                    <View style={styles.decisionDetailBlock}>
+                      <Text style={styles.decisionDetailLabel}>OCZEKIWANIE</Text>
+                      <Text style={styles.decisionDetailText}>{decision.expectation}</Text>
+                    </View>
+                  )}
+                  {!!decision.risk && (
+                    <View style={styles.decisionDetailBlock}>
+                      <Text style={styles.decisionDetailLabel}>RYZYKO</Text>
+                      <Text style={styles.decisionDetailText}>{decision.risk}</Text>
+                    </View>
+                  )}
+
+                  <View style={styles.decisionPills}>
+                    <Text style={[styles.decisionPill, decision.goalAligned ? styles.decisionPillGood : styles.decisionPillWarn]}>
+                      CEL {decision.goalAligned ? '✓' : '×'}
+                    </Text>
+                    <Text style={[styles.decisionPill, decision.identityAligned ? styles.decisionPillGood : styles.decisionPillWarn]}>
+                      TOŻSAMOŚĆ {decision.identityAligned ? '✓' : '×'}
+                    </Text>
+                  </View>
+
+                  <Text style={styles.decisionReviewDate}>
+                    Sprawdź: {formatFullPolishDate(fromDateKey(decision.reviewDate))}
+                  </Text>
+
+                  {isReviewing ? (
+                    <View style={styles.decisionReviewBox}>
+                      <Text style={styles.decisionSectionLabel}>JAK OCENIASZ TĘ DECYZJĘ?</Text>
+                      <View style={styles.decisionVerdictRow}>
+                        {[
+                          ['good', 'DOBRA'],
+                          ['bad', 'ZŁA'],
+                          ['early', 'ZA WCZEŚNIE'],
+                        ].map(([id, label]) => (
+                          <Pressable
+                            key={id}
+                            onPress={() => setReviewVerdict(id)}
+                            style={[styles.decisionVerdictChip, reviewVerdict === id && styles.decisionVerdictChipActive]}
+                          >
+                            <Text style={[styles.decisionVerdictText, reviewVerdict === id && styles.decisionVerdictTextActive]}>
+                              {label}
+                            </Text>
+                          </Pressable>
+                        ))}
+                      </View>
+
+                      <JournalField
+                        label="CO FAKTYCZNIE SIĘ WYDARZYŁO?"
+                        value={reviewOutcome}
+                        onChange={setReviewOutcome}
+                        placeholder="Wynik bez dopisywania historii pod rezultat..."
+                        multiline
+                      />
+                      <JournalField
+                        label="CZEGO SIĘ NAUCZYŁEM?"
+                        value={reviewLesson}
+                        onChange={setReviewLesson}
+                        placeholder="Co zrobię tak samo albo inaczej następnym razem?"
+                        multiline
+                      />
+
+                      <View style={styles.decisionActionRow}>
+                        <Pressable onPress={() => setReviewingId(null)} style={[styles.secondaryButton, styles.decisionActionButton]}>
+                          <Text style={styles.secondaryButtonText}>ANULUJ</Text>
+                        </Pressable>
+                        <Pressable onPress={saveReview} style={[styles.primaryButton, styles.decisionActionButton]}>
+                          <Text style={styles.primaryButtonText}>ZAPISZ OCENĘ</Text>
+                        </Pressable>
+                      </View>
+                    </View>
+                  ) : (
+                    <View style={styles.decisionActionRow}>
+                      <Pressable onPress={() => onDeleteDecision(decision.id)} style={[styles.secondaryButton, styles.decisionDeleteButton]}>
+                        <Text style={[styles.secondaryButtonText, { color: COLORS.red }]}>USUŃ</Text>
+                      </Pressable>
+                      <Pressable onPress={() => startReview(decision.id)} style={[styles.primaryButton, styles.decisionActionButton]}>
+                        <Text style={styles.primaryButtonText}>{due ? 'OCEŃ TERAZ' : 'OCEŃ WCZEŚNIEJ'}</Text>
+                      </Pressable>
+                    </View>
+                  )}
+                </View>
+              );
+            })}
+          </View>
+        )}
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.cardKicker}>HISTORIA OCENIONYCH DECYZJI</Text>
+        {reviewed.length === 0 ? (
+          <Text style={[styles.muted, { marginTop: 10 }]}>Tutaj pojawią się decyzje po ich późniejszej ocenie.</Text>
+        ) : (
+          <View style={styles.decisionList}>
+            {reviewed.map((decision) => (
+              <View key={decision.id} style={styles.decisionHistoryItem}>
+                <View style={styles.decisionItemHeader}>
+                  <View style={styles.flex}>
+                    <Text style={styles.decisionItemTitle}>{decision.title}</Text>
+                    <Text style={styles.decisionItemDate}>
+                      oceniono {formatFullPolishDate(fromDateKey(decision.reviewedAt || decision.reviewDate))}
+                    </Text>
+                  </View>
+                  <Text
+                    style={[
+                      styles.decisionFinalBadge,
+                      decision.finalVerdict === 'good' ? styles.decisionFinalGood : styles.decisionFinalBad,
+                    ]}
+                  >
+                    {decision.finalVerdict === 'good' ? 'DOBRA' : 'ZŁA'}
+                  </Text>
+                </View>
+
+                {!!decision.outcome && (
+                  <View style={styles.decisionDetailBlock}>
+                    <Text style={styles.decisionDetailLabel}>CO SIĘ WYDARZYŁO</Text>
+                    <Text style={styles.decisionDetailText}>{decision.outcome}</Text>
+                  </View>
+                )}
+                {!!decision.lesson && (
+                  <View style={styles.decisionDetailBlock}>
+                    <Text style={styles.decisionDetailLabel}>LEKCJA</Text>
+                    <Text style={styles.decisionDetailText}>{decision.lesson}</Text>
+                  </View>
+                )}
+
+                <Pressable onPress={() => onDeleteDecision(decision.id)} style={styles.decisionHistoryDelete}>
+                  <Text style={styles.decisionHistoryDeleteText}>USUŃ Z HISTORII</Text>
+                </Pressable>
+              </View>
+            ))}
+          </View>
+        )}
+      </View>
+    </View>
+  );
+}
+
 function WhyScreen({
   whyText,
   visionImages,
@@ -1604,7 +2103,7 @@ function WhyScreen({
 
       <View style={styles.card}>
         <Text style={styles.inputLabel}>BACKUP DANYCH</Text>
-        <Text style={styles.muted}>Backup zawiera cele, historię dyscypliny, zasady, „dlaczego” i zdjęcia z Vision Board.</Text>
+        <Text style={styles.muted}>Backup zawiera cele, dziennik decyzji, historię dyscypliny, zasady, „dlaczego” i zdjęcia z Vision Board.</Text>
         <View style={styles.backupButtons}>
           <Pressable onPress={exportBackup} style={styles.primaryButton}>
             <Text style={styles.primaryButtonText}>EKSPORTUJ BACKUP</Text>
@@ -1992,6 +2491,7 @@ function BottomNav({ tab, setTab }) {
     ['home', 'START', '◆'],
     ['goals', 'CELE', '✓'],
     ['journal', 'DZIENNIK', '✎'],
+    ['decisions', 'DECYZJE', '◇'],
     ['why', 'DLACZEGO', '◎'],
     ['streak', 'DYSCYPLINA', '↗'],
   ];
@@ -2277,6 +2777,73 @@ const styles = StyleSheet.create({
   resetCloseButton: { backgroundColor: COLORS.gold, borderRadius: 14, paddingVertical: 15, alignItems: 'center', marginTop: 4 },
   resetCloseText: { color: '#151108', fontSize: 12, fontWeight: '900', letterSpacing: 0.8 },
 
+  decisionDueHome: { borderColor: '#66511F', backgroundColor: '#171309' },
+  decisionDueHomeRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  decisionDueHomeTitle: { color: COLORS.text, fontSize: 17, fontWeight: '900', lineHeight: 23, marginTop: 6 },
+  decisionDueHomeArrow: { color: COLORS.yellow, fontSize: 34, fontWeight: '700' },
+
+  decisionSectionLabel: { color: COLORS.gold, fontSize: 9, fontWeight: '900', letterSpacing: 1.4, marginTop: 18, marginBottom: 8 },
+  decisionToggle: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    borderWidth: 1, borderColor: COLORS.border, borderRadius: 13,
+    padding: 12, backgroundColor: '#0B1017', marginTop: 8,
+  },
+  decisionToggleActive: { borderColor: '#285F48', backgroundColor: '#0D1914' },
+  decisionToggleText: { color: COLORS.text, flex: 1, fontSize: 12, fontWeight: '700', lineHeight: 18 },
+  decisionReviewChips: { flexDirection: 'row', gap: 8 },
+  decisionReviewChip: {
+    flex: 1, alignItems: 'center', borderWidth: 1, borderColor: COLORS.border,
+    borderRadius: 11, paddingVertical: 11, backgroundColor: '#0B1017',
+  },
+  decisionReviewChipActive: { borderColor: COLORS.goldSoft, backgroundColor: '#211B0E' },
+  decisionReviewChipText: { color: COLORS.muted, fontSize: 10, fontWeight: '900' },
+  decisionReviewChipTextActive: { color: COLORS.gold },
+  decisionList: { marginTop: 12, gap: 10 },
+  decisionItem: {
+    borderWidth: 1, borderColor: COLORS.border, borderRadius: 16,
+    padding: 14, backgroundColor: '#0B1017',
+  },
+  decisionItemDue: { borderColor: '#6C5420', backgroundColor: '#151208' },
+  decisionItemHeader: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
+  decisionItemTitle: { color: COLORS.text, fontSize: 16, fontWeight: '900', lineHeight: 22 },
+  decisionItemDate: { color: COLORS.muted, fontSize: 9, marginTop: 4 },
+  decisionDueBadge: {
+    color: '#1A1406', backgroundColor: COLORS.yellow, fontSize: 8, fontWeight: '900',
+    paddingHorizontal: 8, paddingVertical: 5, borderRadius: 8, overflow: 'hidden',
+  },
+  decisionDetailBlock: { marginTop: 12, paddingTop: 10, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: COLORS.border },
+  decisionDetailLabel: { color: COLORS.muted, fontSize: 8, fontWeight: '900', letterSpacing: 1.1, marginBottom: 5 },
+  decisionDetailText: { color: '#DCE2EB', fontSize: 12, lineHeight: 18, fontWeight: '600' },
+  decisionPills: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginTop: 12 },
+  decisionPill: { fontSize: 8, fontWeight: '900', paddingHorizontal: 8, paddingVertical: 5, borderRadius: 8, overflow: 'hidden' },
+  decisionPillGood: { color: COLORS.green, backgroundColor: '#102019' },
+  decisionPillWarn: { color: COLORS.red, backgroundColor: '#241114' },
+  decisionReviewDate: { color: COLORS.gold, fontSize: 10, fontWeight: '800', marginTop: 12 },
+  decisionReviewBox: { marginTop: 14, borderTopWidth: 1, borderTopColor: COLORS.border, paddingTop: 2 },
+  decisionVerdictRow: { flexDirection: 'row', gap: 7 },
+  decisionVerdictChip: {
+    flex: 1, alignItems: 'center', borderWidth: 1, borderColor: COLORS.border,
+    borderRadius: 10, paddingVertical: 9, backgroundColor: '#080C12',
+  },
+  decisionVerdictChipActive: { borderColor: COLORS.goldSoft, backgroundColor: '#211B0E' },
+  decisionVerdictText: { color: COLORS.muted, fontSize: 8, fontWeight: '900' },
+  decisionVerdictTextActive: { color: COLORS.gold },
+  decisionActionRow: { flexDirection: 'row', gap: 8, marginTop: 13 },
+  decisionActionButton: { flex: 1 },
+  decisionDeleteButton: { width: 78 },
+  decisionHistoryItem: {
+    borderWidth: 1, borderColor: '#263243', borderRadius: 15,
+    padding: 14, backgroundColor: '#0A0F16',
+  },
+  decisionFinalBadge: {
+    fontSize: 8, fontWeight: '900', paddingHorizontal: 8, paddingVertical: 5,
+    borderRadius: 8, overflow: 'hidden',
+  },
+  decisionFinalGood: { color: COLORS.green, backgroundColor: '#102019' },
+  decisionFinalBad: { color: COLORS.red, backgroundColor: '#241114' },
+  decisionHistoryDelete: { marginTop: 12, alignSelf: 'flex-start', paddingVertical: 5 },
+  decisionHistoryDeleteText: { color: '#85585E', fontSize: 8, fontWeight: '900', letterSpacing: 0.6 },
+
   bottomNav: {
     position: 'absolute', left: 0, right: 0, bottom: 0,
     flexDirection: 'row', backgroundColor: '#0A0E14EE',
@@ -2285,7 +2852,7 @@ const styles = StyleSheet.create({
   },
   navItem: { flex: 1, alignItems: 'center', justifyContent: 'center', minHeight: 52 },
   navSymbol: { color: '#596577', fontSize: 17, fontWeight: '900' },
-  navLabel: { color: '#596577', fontSize: 8, fontWeight: '900', letterSpacing: 0.5, marginTop: 3 },
+  navLabel: { color: '#596577', fontSize: 7.2, fontWeight: '900', letterSpacing: 0.25, marginTop: 3 },
   navActive: { color: COLORS.gold },
   focusPreview: { color: COLORS.text, fontSize: 17, fontWeight: '800', lineHeight: 24, marginTop: 10 },
   completedGoalHistory: { marginTop: 18, paddingTop: 14, borderTopWidth: 1, borderTopColor: COLORS.border, gap: 8 },
